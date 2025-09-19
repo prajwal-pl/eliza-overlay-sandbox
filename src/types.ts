@@ -93,6 +93,8 @@ export interface Env {
   ELIZAOS_API_KEY?: string;
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
+  TELEGRAM_BOT_TOKEN?: string;
+  ELIZAOS_BASE_URL?: string;
 }
 
 // Utility Types

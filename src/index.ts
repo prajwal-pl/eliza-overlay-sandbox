@@ -4,6 +4,8 @@ import { ProxyService } from './services/proxy';
 import { PricingService } from './services/pricing';
 import { UsageService } from './services/usage';
 import { AgentService } from './services/agent';
+import { ElizaTelegramRuntime } from './eliza-telegram-runtime';
+import { testTelegramSetup, testTelegramBotToken } from './telegram-test';
 
 /**
  * ElizaOS Overlay Sandbox Worker
@@ -26,10 +28,25 @@ export default {
 			// Route handlers
 			switch (path) {
 				case '/health':
-					return handleHealth();
+					return handleHealth(env);
 
 				case '/agent/chat':
 					return handleAgentChat(request, env, ctx);
+
+				case '/telegram/start':
+					return handleTelegramStart(request, env);
+
+				case '/telegram/stop':
+					return handleTelegramStop(request, env);
+
+				case '/telegram/status':
+					return handleTelegramStatus(env);
+
+				case '/telegram/test':
+					return handleTelegramTest(request, env);
+
+				case '/webhook/telegram':
+					return handleTelegramWebhook(request, env);
 
 				default:
 					return createErrorResponse(404, 'Not Found', 'Endpoint not found');
@@ -59,8 +76,22 @@ function handleCors(): Response {
 /**
  * Handle health check endpoint
  */
-function handleHealth(): Response {
-	return new Response(JSON.stringify({ status: 'ok', service: 'eliza-overlay-sandbox' }), {
+async function handleHealth(env: Env): Promise<Response> {
+	const telegramRuntime = ElizaTelegramRuntime.getInstance();
+	const telegramHealth = await telegramRuntime.healthCheck();
+
+	const health = {
+		status: 'ok',
+		service: 'eliza-overlay-sandbox',
+		components: {
+			api: 'healthy',
+			database: env.USAGE_DB ? 'connected' : 'not_configured',
+			telegram: telegramHealth.healthy ? 'running' : 'stopped',
+		},
+		telegram: telegramHealth,
+	};
+
+	return new Response(JSON.stringify(health), {
 		status: 200,
 		headers: { 'Content-Type': 'application/json' },
 	});
@@ -107,7 +138,7 @@ async function handleAgentChat(request: Request, env: Env, ctx: ExecutionContext
 		await agentService.initialize();
 
 		// Extract session and user information
-		const sessionId = usageService.extractSessionId(request);
+		const sessionId = usageService.extractSessionId(request) || 'default-session';
 		const userId = authResult.keyId; // Use API key ID as user identifier
 
 		// Get user message from request
@@ -118,7 +149,7 @@ async function handleAgentChat(request: Request, env: Env, ctx: ExecutionContext
 			: 'Hello';
 
 		// Process message through ElizaOS agent
-		const agentResponse = await agentService.processMessage(userMessage, sessionId, userId);
+		const agentResponse = await agentService.processMessage(userMessage, sessionId, userId ?? 'anonymous');
 
 		// Convert agent response to ElizaOS Cloud API format
 		const elizaResponse = {
@@ -193,6 +224,276 @@ async function handleAgentChat(request: Request, env: Env, ctx: ExecutionContext
 		}
 
 		return createErrorResponse(500, 'Internal Server Error', 'Request processing failed');
+	}
+}
+
+/**
+ * Handle Telegram bot start endpoint
+ */
+async function handleTelegramStart(request: Request, env: Env): Promise<Response> {
+	try {
+		if (request.method !== 'POST') {
+			return createErrorResponse(405, 'Method Not Allowed', 'Only POST requests are allowed');
+		}
+
+		// Validate API key
+		const authService = new AuthService(env);
+		const authResult = await authService.validateApiKey(request);
+		if (!authResult.success) {
+			return createErrorResponse(401, 'Unauthorized', authResult.error || 'Invalid API key');
+		}
+
+		// Parse request body for Telegram bot token
+		let requestBody: { telegramBotToken: string };
+		try {
+			requestBody = await request.json() as { telegramBotToken: string };
+		} catch (error) {
+			return createErrorResponse(400, 'Bad Request', 'Invalid JSON body. Expected: {"telegramBotToken": "..."}');
+		}
+
+		if (!requestBody.telegramBotToken) {
+			return createErrorResponse(400, 'Bad Request', 'telegramBotToken is required');
+		}
+
+		// Initialize and start Telegram runtime
+		const telegramRuntime = ElizaTelegramRuntime.getInstance();
+
+		await telegramRuntime.initialize({
+			env,
+			telegramBotToken: requestBody.telegramBotToken,
+		});
+
+		await telegramRuntime.start();
+
+		// Add token to my-project/.env for persistence
+		await ElizaTelegramRuntime.ensureTelegramToken(env, requestBody.telegramBotToken);
+
+		return new Response(JSON.stringify({
+			success: true,
+			message: 'ElizaOS Telegram bot started successfully',
+			status: telegramRuntime.getStatus(),
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' },
+		});
+
+	} catch (error: any) {
+		console.error('Telegram start error:', error);
+		return createErrorResponse(500, 'Internal Server Error', error.message || 'Failed to start Telegram bot');
+	}
+}
+
+/**
+ * Handle Telegram bot stop endpoint
+ */
+async function handleTelegramStop(request: Request, env: Env): Promise<Response> {
+	try {
+		if (request.method !== 'POST') {
+			return createErrorResponse(405, 'Method Not Allowed', 'Only POST requests are allowed');
+		}
+
+		// Validate API key
+		const authService = new AuthService(env);
+		const authResult = await authService.validateApiKey(request);
+		if (!authResult.success) {
+			return createErrorResponse(401, 'Unauthorized', authResult.error || 'Invalid API key');
+		}
+
+		// Stop Telegram runtime
+		const telegramRuntime = ElizaTelegramRuntime.getInstance();
+		await telegramRuntime.stop();
+
+		return new Response(JSON.stringify({
+			success: true,
+			message: 'ElizaOS Telegram bot stopped successfully',
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' },
+		});
+
+	} catch (error: any) {
+		console.error('Telegram stop error:', error);
+		return createErrorResponse(500, 'Internal Server Error', error.message || 'Failed to stop Telegram bot');
+	}
+}
+
+/**
+ * Handle Telegram status endpoint
+ */
+async function handleTelegramStatus(env: Env): Promise<Response> {
+	try {
+		const telegramRuntime = ElizaTelegramRuntime.getInstance();
+		const status = telegramRuntime.getStatus();
+		const healthCheck = await telegramRuntime.healthCheck();
+
+		return new Response(JSON.stringify({
+			status,
+			health: healthCheck,
+			instructions: {
+				start: 'POST /telegram/start with {"telegramBotToken": "your-token"}',
+				stop: 'POST /telegram/stop',
+				status: 'GET /telegram/status',
+				test: 'POST /telegram/test with {"telegramBotToken": "your-token"}',
+			},
+		}), {
+			status: 200,
+			headers: { 'Content-Type': 'application/json' },
+		});
+
+	} catch (error: any) {
+		console.error('Telegram status error:', error);
+		return createErrorResponse(500, 'Internal Server Error', error.message || 'Failed to get Telegram status');
+	}
+}
+
+/**
+ * Handle Telegram test endpoint - comprehensive testing without full initialization
+ */
+async function handleTelegramTest(request: Request, env: Env): Promise<Response> {
+	try {
+		if (request.method !== 'POST') {
+			return createErrorResponse(405, 'Method Not Allowed', 'Only POST requests are allowed');
+		}
+
+		// Parse request body for Telegram bot token
+		let requestBody: { telegramBotToken: string };
+		try {
+			requestBody = await request.json() as { telegramBotToken: string };
+		} catch (error) {
+			return createErrorResponse(400, 'Bad Request', 'Invalid JSON body. Expected: {"telegramBotToken": "..."}');
+		}
+
+		if (!requestBody.telegramBotToken) {
+			return createErrorResponse(400, 'Bad Request', 'telegramBotToken is required');
+		}
+
+		console.log('🧪 Running comprehensive Telegram integration tests...');
+
+		// Run all tests
+		const setupTest = await testTelegramSetup(env, requestBody.telegramBotToken);
+		const tokenTest = await testTelegramBotToken(requestBody.telegramBotToken);
+
+		const allTestsResults = {
+			setupTest,
+			tokenTest,
+			overall: {
+				success: setupTest.success && tokenTest.valid,
+				readyForDeployment: setupTest.success && tokenTest.valid,
+				nextSteps: setupTest.success && tokenTest.valid
+					? ['Deploy to Cloudflare Workers', 'Initialize ElizaOS runtime', 'Start Telegram bot']
+					: ['Fix configuration issues', 'Retry tests'],
+			},
+		};
+
+		return new Response(JSON.stringify({
+			success: allTestsResults.overall.success,
+			message: allTestsResults.overall.success
+				? '🎉 All tests passed! Ready for ElizaOS Telegram integration'
+				: '❌ Some tests failed. Check details for issues.',
+			results: allTestsResults,
+			timestamp: new Date().toISOString(),
+		}), {
+			status: allTestsResults.overall.success ? 200 : 400,
+			headers: { 'Content-Type': 'application/json' },
+		});
+
+	} catch (error: any) {
+		console.error('Telegram test error:', error);
+		return createErrorResponse(500, 'Internal Server Error', error.message || 'Failed to run Telegram tests');
+	}
+}
+
+/**
+ * Handle Telegram webhook - process incoming messages
+ */
+async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
+	try {
+		if (request.method !== 'POST') {
+			return createErrorResponse(405, 'Method Not Allowed', 'Only POST requests are allowed');
+		}
+
+		console.log('📨 Received Telegram webhook');
+
+		// Parse Telegram update
+		let update: any;
+		try {
+			update = await request.json();
+		} catch (error) {
+			console.error('Failed to parse webhook JSON:', error);
+			return new Response('OK', { status: 200 }); // Always return 200 to Telegram
+		}
+
+		console.log('📋 Telegram update:', JSON.stringify(update, null, 2));
+
+		// Extract message
+		const message = update.message;
+		if (!message || !message.text) {
+			console.log('⚠️  No text message found in update');
+			return new Response('OK', { status: 200 });
+		}
+
+		const chatId = message.chat.id;
+		const userMessage = message.text;
+		const userId = message.from.id.toString();
+
+		console.log(`👤 User ${userId} in chat ${chatId}: "${userMessage}"`);
+
+		// Initialize Telegram runtime if not already done
+		const telegramRuntime = ElizaTelegramRuntime.getInstance();
+		if (!telegramRuntime.getRuntime()) {
+			console.log('🔄 Initializing Telegram runtime for webhook...');
+			try {
+				await telegramRuntime.initialize({
+					env,
+					telegramBotToken: env.TELEGRAM_BOT_TOKEN || '8376370504:AAHKBNlBUdhjwpIFYap5ddNGHMsCYCvFauc',
+				});
+				console.log('✅ Telegram runtime initialized for webhook');
+			} catch (error) {
+				console.error('❌ Failed to initialize runtime in webhook:', error);
+				// Continue anyway - AgentService has its own initialization
+			}
+		}
+
+		// Process message through agent service
+		const agentService = new AgentService(env);
+		await agentService.initialize();
+
+		const sessionId = `tg-${chatId}`;
+		console.log(`🔄 Processing message through ElizaOS agent...`);
+
+		const agentResponse = await agentService.processMessage(userMessage, sessionId, userId);
+
+		console.log('🤖 Agent response:', agentResponse);
+
+		// Send response back to Telegram
+		const telegramResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify({
+				chat_id: chatId,
+				text: agentResponse.text,
+				parse_mode: 'Markdown'
+			}),
+		});
+
+		const telegramResult = await telegramResponse.json();
+		console.log('📤 Telegram API response:', telegramResult);
+
+		if (!telegramResponse.ok) {
+			console.error('❌ Failed to send message to Telegram:', telegramResult);
+		} else {
+			console.log('✅ Message sent successfully to Telegram');
+		}
+
+		// Always return 200 to Telegram
+		return new Response('OK', { status: 200 });
+
+	} catch (error: any) {
+		console.error('❌ Webhook error:', error);
+		// Always return 200 to Telegram to avoid retries
+		return new Response('OK', { status: 200 });
 	}
 }
 

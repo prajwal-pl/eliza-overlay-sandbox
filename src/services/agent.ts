@@ -5,14 +5,14 @@ import { character } from '../../my-project/src/character';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
- * AgentService provides ElizaOS-style agent responses in Cloudflare Workers
- * Simplified implementation that works with Workers environment
+ * AgentService provides ElizaOS-style agent responses using ElizaOS Cloud API
+ * This service integrates with the ElizaOS ecosystem via the Cloud API
  */
 export class AgentService {
   private character: Character;
   private env: Env;
   private initialized = false;
-  private conversationHistory: Map<string, Array<{ role: string; content: string }>> = new Map();
+  private conversationMemories: Map<string, Array<{ content: { text: string; source: string } }>> = new Map();
 
   constructor(env: Env) {
     this.env = env;
@@ -34,7 +34,7 @@ export class AgentService {
       this.setupEnvironmentVariables();
 
       this.initialized = true;
-      logger.info('ElizaOS agent service initialized successfully');
+      logger.info('ElizaOS agent service initialized successfully (using ElizaOS Cloud API)');
 
     } catch (error) {
       logger.error({ error }, 'Failed to initialize agent service');
@@ -43,7 +43,7 @@ export class AgentService {
   }
 
   /**
-   * Process a user message through the agent logic
+   * Process a user message through the ElizaOS Cloud API
    */
   async processMessage(
     userMessage: string,
@@ -55,36 +55,63 @@ export class AgentService {
     }
 
     try {
-      logger.info({ sessionId, userId, messageLength: userMessage.length }, 'Processing message through agent');
+      logger.info({ sessionId, userId, messageLength: userMessage.length }, 'Processing message through ElizaOS Cloud API');
 
-      // Get or create conversation history for this session
-      if (!this.conversationHistory.has(sessionId)) {
-        this.conversationHistory.set(sessionId, []);
+      // Get conversation history for this session
+      if (!this.conversationMemories.has(sessionId)) {
+        this.conversationMemories.set(sessionId, []);
       }
-      const history = this.conversationHistory.get(sessionId)!;
+      const memories = this.conversationMemories.get(sessionId)!;
 
-      // Add user message to history
-      history.push({ role: 'user', content: userMessage });
+      // Build conversation context from memories
+      const conversationHistory = memories
+        .slice(-10) // Last 10 messages
+        .map(memory => ({
+          role: memory.content.source === 'user' ? 'user' : 'assistant',
+          content: memory.content.text,
+        }));
 
-      // Generate response based on character and message
-      const responseText = await this.generateResponse(userMessage, history, sessionId);
+      // Add current user message
+      conversationHistory.push({
+        role: 'user',
+        content: userMessage,
+      });
 
-      // Add agent response to history
-      history.push({ role: 'assistant', content: responseText });
+      // Make API call to ElizaOS Cloud
+      const elizaResponse = await this.callElizaOSCloudAPI(conversationHistory);
 
-      // Keep history manageable (last 10 exchanges)
-      if (history.length > 20) {
-        history.splice(0, history.length - 20);
+      // Create memory for user message
+      const userMemory = {
+        content: {
+          text: userMessage,
+          source: 'user',
+        },
+      };
+      memories.push(userMemory);
+
+      // Create memory for agent response
+      const agentMemory = {
+        content: {
+          text: elizaResponse.choices[0].message.content,
+          source: 'agent',
+        },
+      };
+      memories.push(agentMemory);
+
+      // Keep memories manageable (last 20)
+      if (memories.length > 20) {
+        memories.splice(0, memories.length - 20);
       }
-
-      // Estimate token usage
-      const estimatedUsage = this.estimateTokenUsage(userMessage, responseText);
 
       const agentResponse: AgentResponse = {
-        id: uuidv4(),
-        text: responseText,
-        model: 'eliza-sandbox-agent',
-        usage: estimatedUsage,
+        id: elizaResponse.id,
+        text: elizaResponse.choices[0].message.content,
+        model: elizaResponse.model,
+        usage: {
+          prompt_tokens: elizaResponse.usage.prompt_tokens,
+          completion_tokens: elizaResponse.usage.completion_tokens,
+          total_tokens: elizaResponse.usage.total_tokens,
+        },
         metadata: {
           sessionId,
           userId,
@@ -96,13 +123,13 @@ export class AgentService {
       logger.info({
         responseId: agentResponse.id,
         usage: agentResponse.usage,
-        responseLength: responseText.length
-      }, 'Agent response generated successfully');
+        responseLength: agentResponse.text.length
+      }, 'Agent response generated successfully via ElizaOS Cloud API');
 
       return agentResponse;
 
     } catch (error) {
-      logger.error({ error, sessionId, userId }, 'Error processing message through agent');
+      logger.error({ error, sessionId, userId }, 'Error processing message through ElizaOS Cloud API');
 
       // Return error response in expected format
       return {
@@ -125,93 +152,45 @@ export class AgentService {
   }
 
   /**
-   * Generate a response based on character and conversation
+   * Call ElizaOS Cloud API directly
    */
-  private async generateResponse(
-    userMessage: string,
-    history: Array<{ role: string; content: string }>,
-    sessionId: string
-  ): Promise<string> {
-    // Check for sandbox status requests
-    const lowerMessage = userMessage.toLowerCase();
-    if (lowerMessage.includes('status') || lowerMessage.includes('sandbox') || lowerMessage.includes('info')) {
-      return `🏗️ **ElizaOS Overlay Sandbox Status**
+  private async callElizaOSCloudAPI(messages: Array<{ role: string; content: string }>): Promise<any> {
+    const systemPrompt = this.character.system || 'You are a helpful AI assistant.';
+    const characterBio = Array.isArray(this.character.bio)
+      ? this.character.bio.join(' ')
+      : this.character.bio;
 
-**Environment**: Cloudflare Workers
-**Agent**: ${this.character.name} (Full ElizaOS Agent)
-**Memory**: Persistent across conversations
-**Plugins**: ${this.character.plugins.join(', ')}
-**Billing**: 20% sandbox fee applied
-**Session**: ${sessionId}
+    // Prepend system message with character information
+    const systemMessage = {
+      role: 'system',
+      content: `${systemPrompt}
 
-I'm a full ElizaOS agent with memory and personality, not just an API proxy. This sandbox demonstrates the complete ElizaOS framework running in a serverless environment with transparent billing.`;
+You are ${this.character.name}. ${characterBio}`,
+    };
+
+    const allMessages = [systemMessage, ...messages];
+
+    const apiUrl = this.env.ELIZAOS_BASE_URL || this.env.ELIZA_BASE_URL;
+    const response = await fetch(`${apiUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.env.ELIZAOS_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o',
+        messages: allMessages,
+        temperature: 0.7,
+        max_tokens: 1000,
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`ElizaOS Cloud API error: ${response.status} ${response.statusText} - ${errorText}`);
     }
 
-    // Use character's message examples for pattern matching
-    for (const example of this.character.messageExamples || []) {
-      if (example.length >= 2) {
-        const userExample = example[0];
-        const agentExample = example[1];
-
-        if (userExample.content && typeof userExample.content.text === 'string' &&
-            agentExample.content && typeof agentExample.content.text === 'string') {
-
-          const similarity = this.calculateSimilarity(userMessage, userExample.content.text);
-          if (similarity > 0.5) {
-            // Return a variation of the example response
-            return this.adaptResponse(agentExample.content.text, userMessage);
-          }
-        }
-      }
-    }
-
-    // Generate response based on character system prompt and bio
-    return this.generateCharacterResponse(userMessage, history);
-  }
-
-  /**
-   * Generate a character-appropriate response
-   */
-  private generateCharacterResponse(
-    userMessage: string,
-    history: Array<{ role: string; content: string }>
-  ): string {
-    const greetings = ['hello', 'hi', 'hey', 'greetings'];
-    const questions = ['what', 'how', 'why', 'when', 'where', 'who'];
-
-    const lowerMessage = userMessage.toLowerCase();
-
-    // Handle greetings
-    if (greetings.some(greeting => lowerMessage.includes(greeting))) {
-      return `Hello! I'm ${this.character.name}, ${this.character.bio?.[0] || 'an AI assistant'}. How can I help you today?`;
-    }
-
-    // Handle questions
-    if (questions.some(q => lowerMessage.startsWith(q))) {
-      return `That's a great question! As ${this.character.name}, I'm here to help you with ${this.character.topics?.[0] || 'various topics'}. Based on your question about "${userMessage}", I'd be happy to provide assistance. Could you tell me more specifically what you'd like to know?`;
-    }
-
-    // Default response based on character
-    return `Thank you for your message! As ${this.character.name}, I'm ${this.character.bio?.[0] || 'an AI assistant'} focused on ${this.character.topics?.slice(0, 2).join(' and ') || 'helping users'}. I'd be happy to help you with whatever you need. Could you tell me more about what you're looking for?`;
-  }
-
-  /**
-   * Calculate simple similarity between two strings
-   */
-  private calculateSimilarity(str1: string, str2: string): number {
-    const words1 = str1.toLowerCase().split(/\s+/);
-    const words2 = str2.toLowerCase().split(/\s+/);
-
-    const commonWords = words1.filter(word => words2.includes(word));
-    return commonWords.length / Math.max(words1.length, words2.length);
-  }
-
-  /**
-   * Adapt an example response to the current message
-   */
-  private adaptResponse(exampleResponse: string, userMessage: string): string {
-    // Simple adaptation - could be made more sophisticated
-    return exampleResponse.replace(/{{user}}/g, 'you').replace(/{{name1}}/g, 'you');
+    return await response.json();
   }
 
   /**
@@ -232,7 +211,7 @@ I'm a full ElizaOS agent with memory and personality, not just an API proxy. Thi
    * Cleanup resources
    */
   async cleanup(): Promise<void> {
-    this.conversationHistory.clear();
+    this.conversationMemories.clear();
     this.initialized = false;
     logger.info('Agent service cleaned up');
   }
@@ -244,7 +223,7 @@ I'm a full ElizaOS agent with memory and personality, not just an API proxy. Thi
     // Set up environment variables for plugins to use
     if (this.env.ELIZAOS_API_KEY) {
       process.env.ELIZAOS_API_KEY = this.env.ELIZAOS_API_KEY;
-      process.env.ELIZAOS_BASE_URL = this.env.ELIZA_BASE_URL;
+      process.env.ELIZAOS_BASE_URL = this.env.ELIZA_BASE_URL || this.env.ELIZAOS_BASE_URL;
     }
 
     if (this.env.ANTHROPIC_API_KEY) {

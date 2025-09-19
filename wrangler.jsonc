@@ -7,6 +7,7 @@
 	"name": "eliza-overlay-sandbox",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-09-19",
+	"account_id": "057cc8b8f81e3f819e3bc24bee4181da",
 	"compatibility_flags": ["nodejs_compat"],
 	"assets": {
 		// The path to the directory containing the `index.html` file to be served at `/`
@@ -30,7 +31,10 @@
 	],
 	"vars": {
 		"ELIZA_BASE_URL": "https://eliza-cloud-private-production.up.railway.app/api/v1",
-		"SANDBOX_FEE_RATE": "0.20"
+		"ELIZAOS_BASE_URL": "https://eliza-cloud-private-production.up.railway.app/api/v1",
+		"ELIZAOS_API_KEY": "eliza_55bd7b416baf9d1061053c150c312a506d5740d7a3ad5eefc0fd61e14454bc37",
+		"SANDBOX_FEE_RATE": "0.20",
+		"TELEGRAM_BOT_TOKEN": "8376370504:AAHKBNlBUdhjwpIFYap5ddNGHMsCYCvFauc"
 	}
 	/**
 	 * Smart Placement
