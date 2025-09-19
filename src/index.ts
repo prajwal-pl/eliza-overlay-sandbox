@@ -1,8 +1,9 @@
-import type { Env, ElizaChatCompletionRequest, ErrorResponse } from './types';
+import type { Env, ElizaChatCompletionRequest, ErrorResponse, AgentResponse } from './types';
 import { AuthService } from './services/auth';
 import { ProxyService } from './services/proxy';
 import { PricingService } from './services/pricing';
 import { UsageService } from './services/usage';
+import { AgentService } from './services/agent';
 
 /**
  * ElizaOS Overlay Sandbox Worker
@@ -81,6 +82,7 @@ async function handleAgentChat(request: Request, env: Env, ctx: ExecutionContext
 		const proxyService = new ProxyService(env);
 		const pricingService = new PricingService(env);
 		const usageService = new UsageService(env);
+		const agentService = new AgentService(env);
 
 		// Validate API key
 		const authResult = await authService.validateApiKey(request);
@@ -101,18 +103,62 @@ async function handleAgentChat(request: Request, env: Env, ctx: ExecutionContext
 			return createErrorResponse(400, 'Bad Request', validation.error || 'Invalid request');
 		}
 
-		// Forward request to ElizaOS Cloud with validated API key
-		const elizaResponse = await proxyService.forwardRequest(request, requestBody, authResult.apiKey!);
+		// Initialize agent runtime
+		await agentService.initialize();
 
-		// Calculate sandbox fee
+		// Extract session and user information
+		const sessionId = usageService.extractSessionId(request);
+		const userId = authResult.keyId; // Use API key ID as user identifier
+
+		// Get user message from request
+		const userMessage = requestBody.messages?.length > 0
+			? (typeof requestBody.messages[0].content === 'string'
+				? requestBody.messages[0].content
+				: JSON.stringify(requestBody.messages[0].content))
+			: 'Hello';
+
+		// Process message through ElizaOS agent
+		const agentResponse = await agentService.processMessage(userMessage, sessionId, userId);
+
+		// Convert agent response to ElizaOS Cloud API format
+		const elizaResponse = {
+			id: agentResponse.id,
+			object: 'chat.completion',
+			created: Math.floor(Date.now() / 1000),
+			model: agentResponse.model,
+			provider: 'eliza-sandbox-agent',
+			choices: [{
+				index: 0,
+				message: {
+					role: 'assistant',
+					content: agentResponse.text,
+					tool_calls: [],
+				},
+				finish_reason: 'stop',
+			}],
+			usage: {
+				prompt_tokens: agentResponse.usage.prompt_tokens,
+				completion_tokens: agentResponse.usage.completion_tokens,
+				total_tokens: agentResponse.usage.total_tokens,
+				prompt_cost: 0, // Will be calculated by pricing service
+				completion_cost: 0, // Will be calculated by pricing service
+				total_cost: 0, // Will be calculated by pricing service
+			},
+		};
+
+		// Calculate sandbox fee based on agent response
 		const feeCalculation = await pricingService.calculateSandboxFee(
 			elizaResponse.model,
 			elizaResponse.usage.prompt_tokens,
 			elizaResponse.usage.completion_tokens
 		);
 
+		// Update usage costs in response
+		elizaResponse.usage.prompt_cost = feeCalculation.base_cost_usd * (agentResponse.usage.prompt_tokens / agentResponse.usage.total_tokens);
+		elizaResponse.usage.completion_cost = feeCalculation.base_cost_usd * (agentResponse.usage.completion_tokens / agentResponse.usage.total_tokens);
+		elizaResponse.usage.total_cost = feeCalculation.total_cost_usd;
+
 		// Record usage (non-blocking)
-		const sessionId = usageService.extractSessionId(request);
 		const metadata = usageService.createMetadata(request);
 
 		ctx.waitUntil(

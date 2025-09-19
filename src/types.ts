@@ -90,6 +90,9 @@ export interface Env {
   PRICING: KVNamespace;
   ELIZA_BASE_URL: string;
   SANDBOX_FEE_RATE: string;
+  ELIZAOS_API_KEY?: string;
+  ANTHROPIC_API_KEY?: string;
+  OPENAI_API_KEY?: string;
 }
 
 // Utility Types
@@ -116,4 +119,29 @@ export interface ErrorResponse {
     type: string;
     code?: string;
   };
+}
+
+// Agent Types
+export interface AgentResponse {
+  id: string;
+  text: string;
+  model: string;
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
+  metadata?: Record<string, any>;
+}
+
+export interface AgentMemory {
+  id: string;
+  roomId: string;
+  userId: string;
+  content: {
+    text: string;
+    source?: string;
+    metadata?: Record<string, any>;
+  };
+  timestamp: number;
 }
