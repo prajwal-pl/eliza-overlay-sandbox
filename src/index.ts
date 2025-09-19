@@ -404,6 +404,137 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
 }
 
 /**
+ * Split long text into chunks that fit within Telegram's message limit
+ */
+function splitTelegramMessage(text: string, maxLength: number = 4000): string[] {
+	if (text.length <= maxLength) {
+		return [text];
+	}
+
+	const chunks: string[] = [];
+	let currentChunk = '';
+
+	// Split by paragraphs first (double newlines)
+	const paragraphs = text.split('\n\n');
+
+	for (const paragraph of paragraphs) {
+		// If adding this paragraph would exceed the limit
+		if (currentChunk.length + paragraph.length + 2 > maxLength) {
+			// If current chunk has content, save it
+			if (currentChunk.trim()) {
+				chunks.push(currentChunk.trim());
+				currentChunk = '';
+			}
+
+			// If the paragraph itself is too long, split by sentences
+			if (paragraph.length > maxLength) {
+				const sentences = paragraph.split(/[.!?]\s+/);
+				for (const sentence of sentences) {
+					const sentenceWithPunctuation = sentence.includes('.') || sentence.includes('!') || sentence.includes('?')
+						? sentence
+						: sentence + '.';
+
+					if (currentChunk.length + sentenceWithPunctuation.length + 1 > maxLength) {
+						if (currentChunk.trim()) {
+							chunks.push(currentChunk.trim());
+							currentChunk = '';
+						}
+
+						// If even a single sentence is too long, split by words
+						if (sentenceWithPunctuation.length > maxLength) {
+							const words = sentenceWithPunctuation.split(' ');
+							for (const word of words) {
+								if (currentChunk.length + word.length + 1 > maxLength) {
+									if (currentChunk.trim()) {
+										chunks.push(currentChunk.trim());
+										currentChunk = '';
+									}
+								}
+								currentChunk += (currentChunk ? ' ' : '') + word;
+							}
+						} else {
+							currentChunk = sentenceWithPunctuation;
+						}
+					} else {
+						currentChunk += (currentChunk ? ' ' : '') + sentenceWithPunctuation;
+					}
+				}
+			} else {
+				currentChunk = paragraph;
+			}
+		} else {
+			currentChunk += (currentChunk ? '\n\n' : '') + paragraph;
+		}
+	}
+
+	// Add any remaining content
+	if (currentChunk.trim()) {
+		chunks.push(currentChunk.trim());
+	}
+
+	return chunks.filter(chunk => chunk.trim().length > 0);
+}
+
+/**
+ * Send a message to Telegram, splitting it into multiple messages if too long
+ */
+async function sendTelegramMessage(
+	chatId: number,
+	text: string,
+	telegramBotToken: string
+): Promise<{ success: boolean; error?: string }> {
+	const chunks = splitTelegramMessage(text);
+
+	console.log(`📝 Splitting message into ${chunks.length} chunks`);
+
+	for (let i = 0; i < chunks.length; i++) {
+		const chunk = chunks[i];
+		const isLastChunk = i === chunks.length - 1;
+
+		// Add part indicator for multi-part messages
+		const messageText = chunks.length > 1
+			? `${chunk}\n\n${isLastChunk ? '✅ End' : `(${i + 1}/${chunks.length})`}`
+			: chunk;
+
+		console.log(`📤 Sending chunk ${i + 1}/${chunks.length} (${messageText.length} chars)`);
+
+		try {
+			const response = await fetch(`https://api.telegram.org/bot${telegramBotToken}/sendMessage`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify({
+					chat_id: chatId,
+					text: messageText,
+					parse_mode: 'Markdown'
+				}),
+			});
+
+			const result = await response.json();
+
+			if (!response.ok) {
+				console.error(`❌ Failed to send chunk ${i + 1}:`, result);
+				return { success: false, error: result.description || 'Failed to send message chunk' };
+			}
+
+			console.log(`✅ Chunk ${i + 1} sent successfully`);
+
+			// Small delay between messages to avoid rate limiting
+			if (i < chunks.length - 1) {
+				await new Promise(resolve => setTimeout(resolve, 100));
+			}
+
+		} catch (error) {
+			console.error(`❌ Error sending chunk ${i + 1}:`, error);
+			return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+		}
+	}
+
+	return { success: true };
+}
+
+/**
  * Handle Telegram webhook - process incoming messages
  */
 async function handleTelegramWebhook(request: Request, env: Env): Promise<Response> {
@@ -464,25 +595,14 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
 		const agentResponse = await agentService.processMessage(userMessage, sessionId, userId);
 
 		console.log('🤖 Agent response:', agentResponse);
+		console.log(`📏 Response length: ${agentResponse.text.length} characters`);
 
-		// Send response back to Telegram
-		const telegramResponse = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-			},
-			body: JSON.stringify({
-				chat_id: chatId,
-				text: agentResponse.text,
-				parse_mode: 'Markdown'
-			}),
-		});
+		// Send response back to Telegram with message splitting
+		const telegramBotToken = env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '8376370504:AAHKBNlBUdhjwpIFYap5ddNGHMsCYCvFauc';
+		const sendResult = await sendTelegramMessage(chatId, agentResponse.text, telegramBotToken);
 
-		const telegramResult = await telegramResponse.json();
-		console.log('📤 Telegram API response:', telegramResult);
-
-		if (!telegramResponse.ok) {
-			console.error('❌ Failed to send message to Telegram:', telegramResult);
+		if (!sendResult.success) {
+			console.error('❌ Failed to send message to Telegram:', sendResult.error);
 		} else {
 			console.log('✅ Message sent successfully to Telegram');
 		}
