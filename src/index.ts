@@ -26,30 +26,35 @@ export default {
 			const path = url.pathname;
 
 			// Route handlers
-			switch (path) {
-				case '/health':
+			switch (true) {
+				case path === '/health':
 					return handleHealth(env);
 
-				case '/agent/chat':
+				case path === '/agent/chat':
 					return handleAgentChat(request, env, ctx);
 
-				case '/telegram/start':
+				case path === '/telegram/start':
 					return handleTelegramStart(request, env);
 
-				case '/telegram/stop':
+				case path === '/telegram/stop':
 					return handleTelegramStop(request, env);
 
-				case '/telegram/status':
+				case path === '/telegram/status':
 					return handleTelegramStatus(env);
 
-				case '/telegram/test':
+				case path === '/telegram/test':
 					return handleTelegramTest(request, env);
 
-				case '/webhook/telegram':
+				case path === '/webhook/telegram':
 					return handleTelegramWebhook(request, env);
 
+				// ElizaOS API endpoints
+				case path.startsWith('/api/'):
+					return handleElizaOSAPI(request, env, ctx);
+
 				default:
-					return createErrorResponse(404, 'Not Found', 'Endpoint not found');
+					// Serve frontend for all other paths
+					return handleFrontendServing(request, env);
 			}
 		} catch (error) {
 			console.error('Worker error:', error);
@@ -614,6 +619,407 @@ async function handleTelegramWebhook(request: Request, env: Env): Promise<Respon
 		console.error('❌ Webhook error:', error);
 		// Always return 200 to Telegram to avoid retries
 		return new Response('OK', { status: 200 });
+	}
+}
+
+/**
+ * Handle ElizaOS API endpoints
+ */
+async function handleElizaOSAPI(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+	try {
+		const url = new URL(request.url);
+		const path = url.pathname;
+		const method = request.method;
+
+		// Initialize services
+		const agentService = new AgentService(env);
+		await agentService.initialize();
+
+		console.log(`🔗 ElizaOS API: ${method} ${path}`);
+
+		// Parse path segments
+		const pathParts = path.split('/').filter(p => p !== '' && p !== 'api');
+		const [module, ...rest] = pathParts;
+
+		switch (module) {
+			case 'server':
+				return handleServerAPI(rest, method, request, env);
+
+			case 'agents':
+				return handleAgentsAPI(rest, method, request, env, agentService);
+
+			case 'messaging':
+				return handleMessagingAPI(rest, method, request, env, agentService);
+
+			case 'memory':
+				return handleMemoryAPI(rest, method, request, env, agentService);
+
+			case 'audio':
+				return handleAudioAPI(rest, method, request, env, agentService);
+
+			case 'media':
+				return handleMediaAPI(rest, method, request, env);
+
+			case 'system':
+				return handleSystemAPI(rest, method, request, env);
+
+			default:
+				return createElizaResponse(404, false, null, 'API endpoint not found');
+		}
+	} catch (error) {
+		console.error('ElizaOS API error:', error);
+		return createElizaResponse(500, false, null, 'Internal server error');
+	}
+}
+
+/**
+ * Handle Server API endpoints
+ */
+async function handleServerAPI(pathParts: string[], method: string, request: Request, env: Env): Promise<Response> {
+	const [endpoint] = pathParts;
+
+	switch (endpoint) {
+		case 'ping':
+			if (method === 'GET') {
+				return createElizaResponse(200, true, {
+					pong: true,
+					timestamp: Date.now()
+				});
+			}
+			break;
+
+		case 'status':
+			if (method === 'GET') {
+				return createElizaResponse(200, true, {
+					status: 'ok',
+					agentCount: 1, // We have one agent running
+					timestamp: new Date().toISOString()
+				});
+			}
+			break;
+
+		case 'health':
+			if (method === 'GET') {
+				return createElizaResponse(200, true, {
+					status: 'OK',
+					version: '1.5.10',
+					timestamp: new Date().toISOString(),
+					dependencies: {
+						agents: 'healthy'
+					}
+				});
+			}
+			break;
+
+		case 'hello':
+			if (method === 'GET') {
+				return createElizaResponse(200, true, {
+					message: 'Hello from ElizaOS!',
+					timestamp: new Date().toISOString()
+				});
+			}
+			break;
+	}
+
+	return createElizaResponse(404, false, null, 'Server endpoint not found');
+}
+
+/**
+ * Handle Agents API endpoints
+ */
+async function handleAgentsAPI(pathParts: string[], method: string, request: Request, env: Env, agentService: AgentService): Promise<Response> {
+	if (pathParts.length === 0) {
+		// GET /api/agents - List all agents
+		if (method === 'GET') {
+			return createElizaResponse(200, true, {
+				agents: [{
+					id: 'eliza-overlay-agent',
+					name: 'Eliza (ElizaOS)',
+					characterName: 'Eliza (ElizaOS)',
+					bio: 'ElizaOS agent running in Cloudflare Workers',
+					status: 'active'
+				}]
+			});
+		}
+	}
+
+	const [agentId, submodule, ...subParts] = pathParts;
+
+	if (agentId && !submodule) {
+		// GET /api/agents/:agentId - Get specific agent
+		if (method === 'GET') {
+			return createElizaResponse(200, true, {
+				id: agentId,
+				enabled: true,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				name: 'Eliza (ElizaOS)',
+				username: 'eliza',
+				system: 'ElizaOS agent running in Cloudflare Workers environment',
+				bio: ['ElizaOS agent', 'Running in Cloudflare Workers', 'Provides AI assistance'],
+				messageExamples: [],
+				postExamples: [],
+				topics: ['general assistance', 'AI conversation'],
+				adjectives: [],
+				knowledge: [],
+				plugins: ['@elizaos/plugin-bootstrap', '@elizaos/plugin-sql'],
+				settings: {
+					avatar: 'https://elizaos.github.io/eliza-avatars/Eliza/portrait.png',
+					secrets: {}
+				},
+				style: {
+					all: ['Be helpful and conversational'],
+					chat: ['Engage naturally'],
+					post: ['Share insights']
+				},
+				status: 'active'
+			});
+		}
+	}
+
+	if (submodule === 'rooms') {
+		// GET /api/agents/:agentId/rooms - Get agent rooms
+		if (method === 'GET') {
+			return createElizaResponse(200, true, {
+				rooms: [{
+					id: 'default-room',
+					agentId: agentId,
+					source: 'cloudflare_worker',
+					type: 'GROUP',
+					serverId: '00000000-0000-0000-0000-000000000000',
+					worldId: 'default-world',
+					name: 'Default Chat Room',
+					metadata: null,
+					channelId: 'default-channel',
+					createdAt: new Date().toISOString()
+				}]
+			});
+		}
+	}
+
+	return createElizaResponse(404, false, null, 'Agent endpoint not found');
+}
+
+/**
+ * Handle Messaging API endpoints
+ */
+async function handleMessagingAPI(pathParts: string[], method: string, request: Request, env: Env, agentService: AgentService): Promise<Response> {
+	const [submodule, ...rest] = pathParts;
+
+	switch (submodule) {
+		case 'central-servers':
+			if (method === 'GET') {
+				return createElizaResponse(200, true, {
+					servers: [{
+						id: '00000000-0000-0000-0000-000000000000',
+						name: 'Default Server',
+						sourceType: 'cloudflare_worker',
+						createdAt: new Date().toISOString(),
+						updatedAt: new Date().toISOString()
+					}]
+				});
+			}
+			break;
+
+		case 'submit':
+			if (method === 'POST') {
+				// Handle message submission
+				const body = await request.json();
+				const { text, agentId, roomId, userId } = body;
+
+				if (!text) {
+					return createElizaResponse(400, false, null, 'Message text is required');
+				}
+
+				try {
+					const sessionId = roomId || 'default-session';
+					const response = await agentService.processMessage(text, sessionId, userId || 'anonymous');
+
+					return createElizaResponse(200, true, {
+						id: response.id,
+						content: response.text,
+						agentId: agentId || 'eliza-overlay-agent',
+						roomId: sessionId,
+						timestamp: new Date().toISOString()
+					});
+				} catch (error) {
+					console.error('Message processing error:', error);
+					return createElizaResponse(500, false, null, 'Failed to process message');
+				}
+			}
+			break;
+	}
+
+	// Handle central-servers/:serverId/channels
+	if (pathParts[0] === 'central-servers' && pathParts[2] === 'channels') {
+		if (method === 'GET') {
+			return createElizaResponse(200, true, {
+				channels: [{
+					id: 'default-channel',
+					messageServerId: '00000000-0000-0000-0000-000000000000',
+					name: 'Default Channel',
+					type: 'GROUP',
+					metadata: {
+						forAgent: 'eliza-overlay-agent',
+						createdAt: new Date().toISOString()
+					},
+					createdAt: new Date().toISOString(),
+					updatedAt: new Date().toISOString()
+				}]
+			});
+		}
+	}
+
+	return createElizaResponse(404, false, null, 'Messaging endpoint not found');
+}
+
+/**
+ * Handle Memory API endpoints
+ */
+async function handleMemoryAPI(pathParts: string[], method: string, request: Request, env: Env, agentService: AgentService): Promise<Response> {
+	return createElizaResponse(200, true, { memories: [] });
+}
+
+/**
+ * Handle Audio API endpoints
+ */
+async function handleAudioAPI(pathParts: string[], method: string, request: Request, env: Env, agentService: AgentService): Promise<Response> {
+	return createElizaResponse(501, false, null, 'Audio API not implemented in this environment');
+}
+
+/**
+ * Handle Media API endpoints
+ */
+async function handleMediaAPI(pathParts: string[], method: string, request: Request, env: Env): Promise<Response> {
+	return createElizaResponse(501, false, null, 'Media API not implemented in this environment');
+}
+
+/**
+ * Handle System API endpoints
+ */
+async function handleSystemAPI(pathParts: string[], method: string, request: Request, env: Env): Promise<Response> {
+	const [endpoint] = pathParts;
+
+	if (endpoint === 'version' && method === 'GET') {
+		return createElizaResponse(200, true, {
+			version: '1.5.10',
+			environment: 'cloudflare-worker',
+			timestamp: new Date().toISOString()
+		});
+	}
+
+	return createElizaResponse(404, false, null, 'System endpoint not found');
+}
+
+/**
+ * Create standardized ElizaOS API response
+ */
+function createElizaResponse(status: number, success: boolean, data: any = null, error: string | null = null): Response {
+	const responseBody = success
+		? { success: true, data }
+		: { success: false, error };
+
+	return new Response(JSON.stringify(responseBody), {
+		status,
+		headers: {
+			'Content-Type': 'application/json',
+			'Access-Control-Allow-Origin': '*',
+			'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+			'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-KEY'
+		}
+	});
+}
+
+/**
+ * Handle frontend serving with dynamic configuration injection
+ */
+async function handleFrontendServing(request: Request, env: Env): Promise<Response> {
+	try {
+		const url = new URL(request.url);
+
+		// For the root path, serve index.html with injected configuration
+		if (url.pathname === '/' || url.pathname === '/index.html') {
+			return serveFrontendWithConfig(env);
+		}
+
+		// For all other paths, try to serve static assets
+		if (env.ASSETS) {
+			const assetResponse = await env.ASSETS.fetch(request);
+			if (assetResponse.status !== 404) {
+				return assetResponse;
+			}
+		}
+
+		// If asset not found, serve index.html for SPA routing
+		return serveFrontendWithConfig(env);
+	} catch (error) {
+		console.error('Frontend serving error:', error);
+		return createErrorResponse(500, 'Internal Server Error', 'Failed to serve frontend');
+	}
+}
+
+/**
+ * Serve frontend index.html with injected ElizaOS configuration
+ */
+async function serveFrontendWithConfig(env: Env): Promise<Response> {
+	try {
+		let htmlResponse;
+
+		// Try to fetch from assets first
+		if (env.ASSETS) {
+			htmlResponse = await env.ASSETS.fetch('/index.html');
+		}
+
+		// If no assets or not found, create a basic HTML response
+		if (!htmlResponse || htmlResponse.status === 404) {
+			const fallbackHtml = `<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ElizaOS Agent Interface</title>
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module" src="/assets/index.js"></script>
+</body>
+</html>`;
+
+			htmlResponse = new Response(fallbackHtml, {
+				headers: { 'Content-Type': 'text/html' }
+			});
+		}
+
+		let htmlText = await htmlResponse.text();
+
+		// Inject ElizaOS configuration
+		const config = {
+			agentId: env.AGENT_ID || 'eliza-overlay-agent',
+			apiBase: env.ELIZAOS_BASE_URL || 'https://eliza-cloud-private-production.up.railway.app/api/v1',
+			environment: 'production',
+			workerUrl: new URL(request.url).origin
+		};
+
+		// Inject config script before any existing scripts
+		htmlText = htmlText.replace(
+			'<script',
+			`<script>
+				window.ELIZA_CONFIG = ${JSON.stringify(config)};
+				console.log('ElizaOS Config loaded:', window.ELIZA_CONFIG);
+			</script>
+			<script`
+		);
+
+		return new Response(htmlText, {
+			headers: {
+				'Content-Type': 'text/html',
+				'Cache-Control': 'no-cache'
+			}
+		});
+	} catch (error) {
+		console.error('Config injection error:', error);
+		return createErrorResponse(500, 'Internal Server Error', 'Failed to serve frontend with config');
 	}
 }
 

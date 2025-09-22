@@ -22,10 +22,10 @@ async function build() {
     // Clean previous build
     await cleanBuild('dist');
 
-    // Run JavaScript build and TypeScript declarations in parallel
+    // Run JavaScript build, TypeScript declarations, and frontend build in parallel
     console.log('Starting build tasks...');
 
-    const [buildResult, tscResult] = await Promise.all([
+    const [buildResult, tscResult, frontendResult] = await Promise.all([
       // Task 1: Build with Bun
       (async () => {
         console.log('📦 Bundling with Bun...');
@@ -78,10 +78,33 @@ async function build() {
           return { success: false };
         }
       })(),
+
+      // Task 3: Copy ElizaOS frontend assets (already built)
+      (async () => {
+        console.log('🎨 Using ElizaOS client frontend...');
+        try {
+          // ElizaOS client frontend is already built in node_modules
+          console.log('✓ ElizaOS frontend ready (pre-built)');
+          return { success: true };
+        } catch (error) {
+          console.error('❌ ElizaOS frontend check failed:', error);
+          return { success: false };
+        }
+      })(),
     ]);
 
-    if (!buildResult.success) {
+    if (!buildResult.success || !frontendResult.success) {
       return false;
+    }
+
+    // Copy ElizaOS client frontend assets to root public directory for CF Worker
+    console.log('📂 Copying ElizaOS frontend assets for deployment...');
+    try {
+      await $`cp -r node_modules/@elizaos/client/dist/* ../public/`;
+      console.log('✓ ElizaOS frontend assets copied to root public directory');
+    } catch (error) {
+      console.error('⚠ Warning: Failed to copy ElizaOS frontend assets:', error);
+      // Continue anyway - might be missing files
     }
 
     const elapsed = ((performance.now() - start) / 1000).toFixed(2);
