@@ -88,6 +88,7 @@ export interface PricingData {
 export interface Env {
   USAGE_DB: D1Database;
   PRICING: KVNamespace;
+  ASSETS?: Fetcher;
   ELIZA_BASE_URL: string;
   SANDBOX_FEE_RATE: string;
   ELIZAOS_API_KEY?: string;
@@ -95,6 +96,7 @@ export interface Env {
   OPENAI_API_KEY?: string;
   TELEGRAM_BOT_TOKEN?: string;
   ELIZAOS_BASE_URL?: string;
+  AGENT_ID?: string;
 }
 
 // Utility Types

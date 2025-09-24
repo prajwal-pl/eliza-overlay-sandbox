@@ -1,4 +1,11 @@
 import type { Env, ElizaChatCompletionRequest, ErrorResponse, AgentResponse } from './types';
+import {
+  createCorsPreflightResponse,
+  createJsonResponseWithCors,
+  createErrorResponseWithCors,
+  createResponseWithCors,
+  handleCorsMiddleware
+} from './utils/cors';
 import { AuthService } from './services/auth';
 import { ProxyService } from './services/proxy';
 import { PricingService } from './services/pricing';
@@ -17,9 +24,10 @@ import { testTelegramSetup, testTelegramBotToken } from './telegram-test';
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		try {
-			// Handle CORS preflight
-			if (request.method === 'OPTIONS') {
-				return handleCors();
+			// Handle CORS preflight and origin validation
+			const corsResponse = handleCorsMiddleware(request);
+			if (corsResponse) {
+				return corsResponse;
 			}
 
 			const url = new URL(request.url);
@@ -64,18 +72,10 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 /**
- * Handle CORS preflight requests
+ * Handle CORS preflight requests using the modular CORS utility
  */
 function handleCors(): Response {
-	return new Response(null, {
-		status: 204,
-		headers: {
-			'Access-Control-Allow-Origin': '*',
-			'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-			'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Eliza-Cloud-Key',
-			'Access-Control-Max-Age': '86400',
-		},
-	});
+	return createCorsPreflightResponse();
 }
 
 /**
@@ -96,10 +96,7 @@ async function handleHealth(env: Env): Promise<Response> {
 		telegram: telegramHealth,
 	};
 
-	return new Response(JSON.stringify(health), {
-		status: 200,
-		headers: { 'Content-Type': 'application/json' },
-	});
+	return createJsonResponseWithCors(health, { status: 200 });
 }
 
 
@@ -273,14 +270,11 @@ async function handleTelegramStart(request: Request, env: Env): Promise<Response
 		// Add token to my-project/.env for persistence
 		await ElizaTelegramRuntime.ensureTelegramToken(env, requestBody.telegramBotToken);
 
-		return new Response(JSON.stringify({
+		return createJsonResponseWithCors({
 			success: true,
 			message: 'ElizaOS Telegram bot started successfully',
 			status: telegramRuntime.getStatus(),
-		}), {
-			status: 200,
-			headers: { 'Content-Type': 'application/json' },
-		});
+		}, { status: 200 });
 
 	} catch (error: any) {
 		console.error('Telegram start error:', error);
@@ -308,13 +302,10 @@ async function handleTelegramStop(request: Request, env: Env): Promise<Response>
 		const telegramRuntime = ElizaTelegramRuntime.getInstance();
 		await telegramRuntime.stop();
 
-		return new Response(JSON.stringify({
+		return createJsonResponseWithCors({
 			success: true,
 			message: 'ElizaOS Telegram bot stopped successfully',
-		}), {
-			status: 200,
-			headers: { 'Content-Type': 'application/json' },
-		});
+		}, { status: 200 });
 
 	} catch (error: any) {
 		console.error('Telegram stop error:', error);
@@ -331,7 +322,7 @@ async function handleTelegramStatus(env: Env): Promise<Response> {
 		const status = telegramRuntime.getStatus();
 		const healthCheck = await telegramRuntime.healthCheck();
 
-		return new Response(JSON.stringify({
+		return createJsonResponseWithCors({
 			status,
 			health: healthCheck,
 			instructions: {
@@ -340,10 +331,7 @@ async function handleTelegramStatus(env: Env): Promise<Response> {
 				status: 'GET /telegram/status',
 				test: 'POST /telegram/test with {"telegramBotToken": "your-token"}',
 			},
-		}), {
-			status: 200,
-			headers: { 'Content-Type': 'application/json' },
-		});
+		}, { status: 200 });
 
 	} catch (error: any) {
 		console.error('Telegram status error:', error);
@@ -390,17 +378,14 @@ async function handleTelegramTest(request: Request, env: Env): Promise<Response>
 			},
 		};
 
-		return new Response(JSON.stringify({
+		return createJsonResponseWithCors({
 			success: allTestsResults.overall.success,
 			message: allTestsResults.overall.success
 				? '🎉 All tests passed! Ready for ElizaOS Telegram integration'
 				: '❌ Some tests failed. Check details for issues.',
 			results: allTestsResults,
 			timestamp: new Date().toISOString(),
-		}), {
-			status: allTestsResults.overall.success ? 200 : 400,
-			headers: { 'Content-Type': 'application/json' },
-		});
+		}, { status: allTestsResults.overall.success ? 200 : 400 });
 
 	} catch (error: any) {
 		console.error('Telegram test error:', error);
@@ -520,7 +505,7 @@ async function sendTelegramMessage(
 
 			if (!response.ok) {
 				console.error(`❌ Failed to send chunk ${i + 1}:`, result);
-				return { success: false, error: result.description || 'Failed to send message chunk' };
+				return { success: false, error: (result as any)?.description || 'Failed to send message chunk' };
 			}
 
 			console.log(`✅ Chunk ${i + 1} sent successfully`);
@@ -824,7 +809,7 @@ async function handleMessagingAPI(pathParts: string[], method: string, request: 
 		case 'submit':
 			if (method === 'POST') {
 				// Handle message submission
-				const body = await request.json();
+				const body = await request.json() as any;
 				const { text, agentId, roomId, userId } = body;
 
 				if (!text) {
@@ -919,15 +904,7 @@ function createElizaResponse(status: number, success: boolean, data: any = null,
 		? { success: true, data }
 		: { success: false, error };
 
-	return new Response(JSON.stringify(responseBody), {
-		status,
-		headers: {
-			'Content-Type': 'application/json',
-			'Access-Control-Allow-Origin': '*',
-			'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-			'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-KEY'
-		}
-	});
+	return createJsonResponseWithCors(responseBody, { status });
 }
 
 /**
@@ -939,7 +916,7 @@ async function handleFrontendServing(request: Request, env: Env): Promise<Respon
 
 		// For the root path, serve index.html with injected configuration
 		if (url.pathname === '/' || url.pathname === '/index.html') {
-			return serveFrontendWithConfig(env);
+			return serveFrontendWithConfig(env, request);
 		}
 
 		// For all other paths, try to serve static assets
@@ -951,7 +928,7 @@ async function handleFrontendServing(request: Request, env: Env): Promise<Respon
 		}
 
 		// If asset not found, serve index.html for SPA routing
-		return serveFrontendWithConfig(env);
+		return serveFrontendWithConfig(env, request);
 	} catch (error) {
 		console.error('Frontend serving error:', error);
 		return createErrorResponse(500, 'Internal Server Error', 'Failed to serve frontend');
@@ -961,7 +938,7 @@ async function handleFrontendServing(request: Request, env: Env): Promise<Respon
 /**
  * Serve frontend index.html with injected ElizaOS configuration
  */
-async function serveFrontendWithConfig(env: Env): Promise<Response> {
+async function serveFrontendWithConfig(env: Env, request: Request): Promise<Response> {
 	try {
 		let htmlResponse;
 
@@ -986,7 +963,7 @@ async function serveFrontendWithConfig(env: Env): Promise<Response> {
 </body>
 </html>`;
 
-			htmlResponse = new Response(fallbackHtml, {
+			htmlResponse = createResponseWithCors(fallbackHtml, {
 				headers: { 'Content-Type': 'text/html' }
 			});
 		}
@@ -1011,7 +988,7 @@ async function serveFrontendWithConfig(env: Env): Promise<Response> {
 			<script`
 		);
 
-		return new Response(htmlText, {
+		return createResponseWithCors(htmlText, {
 			headers: {
 				'Content-Type': 'text/html',
 				'Cache-Control': 'no-cache'
@@ -1027,19 +1004,5 @@ async function serveFrontendWithConfig(env: Env): Promise<Response> {
  * Create standardized error response
  */
 function createErrorResponse(status: number, error: string, message: string): Response {
-	const errorResponse: ErrorResponse = {
-		error: {
-			message,
-			type: error.toLowerCase().replace(/\s+/g, '_'),
-			code: status.toString(),
-		},
-	};
-
-	return new Response(JSON.stringify(errorResponse), {
-		status,
-		headers: {
-			'Content-Type': 'application/json',
-			'Access-Control-Allow-Origin': '*',
-		},
-	});
+	return createErrorResponseWithCors(status, error, message);
 }
